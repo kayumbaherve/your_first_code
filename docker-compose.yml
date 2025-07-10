@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: interior_design_db
+      POSTGRES_USER: interior_user
+      POSTGRES_PASSWORD: interior_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interior_user -d interior_design_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  # Backend API Service
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://interior_user:interior_pass@db:5432/interior_design_db
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+      - SECRET_KEY=your-secret-key-change-in-production
+      - UPLOAD_DIR=/app/uploads
+    volumes:
+      - ./backend:/app
+      - uploads_data:/app/uploads
+      - models_data:/app/models
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend React Application
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_ENVIRONMENT=development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    command: npm start
+
+  # Nginx Reverse Proxy (for production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - frontend
+      - backend
+    profiles:
+      - production
+
+  # ML Model Server (for AI recommendations)
+  ml-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    ports:
+      - "8001:8001"
+    environment:
+      - MODEL_PATH=/app/models
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - models_data:/app/models
+      - ./backend/ml_models:/app/ml_models
+    depends_on:
+      - redis
+    command: python ml_server.py
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+  models_data:
+    driver: local
+
+networks:
+  default:
+    name: interior_design_network
+
